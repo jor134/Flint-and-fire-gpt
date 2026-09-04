@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#17211b">
+<link rel="manifest" href="manifest.json">
+<title>Flint & Fire</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101713;color:#eee;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+canvas{display:block;touch-action:none}
+#ui{position:fixed;inset:0;pointer-events:none}
+.panel{pointer-events:auto;background:rgba(18,24,20,.9);border:1px solid #526257;box-shadow:0 8px 30px #0008;border-radius:10px}
+#top{position:absolute;left:10px;right:10px;top:10px;display:flex;gap:8px;align-items:center;padding:8px 10px}
+.res{padding:3px 9px;font-weight:700}.age{margin-left:auto}
+button{background:#26362b;color:#fff;border:1px solid #607064;border-radius:7px;padding:7px 10px;cursor:pointer}
+button:hover{background:#34483a}button:disabled{opacity:.4;cursor:not-allowed}
+#side{position:absolute;left:10px;bottom:10px;width:250px;padding:10px;max-height:46vh;overflow:auto}
+#actions{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+#selected{min-height:52px;margin-bottom:8px;color:#cfd9d1}
+#minimap{position:absolute;right:10px;bottom:10px;width:170px;height:170px}
+#hint{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);padding:7px 12px;white-space:nowrap}
+#menu{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#08100bdd;pointer-events:auto}
+#menu .box{width:min(520px,90vw);padding:28px;text-align:center}
+h1{font-size:42px;margin:0 0 5px}p{color:#b7c2b9}.row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+small{color:#9eaba1}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="top" class="panel">
+    <div class="res">🍖 <span id="food">0</span></div><div class="res">🪵 <span id="wood">0</span></div>
+    <div class="res">🪙 <span id="gold">0</span></div><div class="res">🪨 <span id="stone">0</span></div>
+    <div class="res">👥 <span id="pop">0/100</span></div>
+    <div class="age">Age: <b id="age">Stone</b> <button id="ageBtn">Advance</button></div>
+  </div>
+  <div id="side" class="panel">
+    <div id="selected">Nothing selected</div>
+    <div id="actions"></div>
+  </div>
+  <canvas id="minimap" class="panel"></canvas>
+  <div id="hint" class="panel">Left-drag select · Right-click move/attack · A attack-move · H town centre · Wheel zoom</div>
+  <div id="menu"><div class="box panel">
+    <h1>FLINT & FIRE</h1><p>Stone Age real-time strategy · browser prototype</p>
+    <div class="row"><button id="start">Skirmish</button><button id="tutorial">Tutorial</button></div>
+    <p><small>Built around the supplied specification: 20 Hz simulation, flow fields, eras, economy, combat and AI.</small></p>
+  </div></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+"use strict";
+const TICK=1/20, TICKMS=50, NT=112, TS=2, WORLD=224, POPMAX=100, CELL=8;
+const TEAM=["#2E9BFF","#FF3B30","#14E0A0","#FFD400"];
+const AGES=[
+ ["Stone",0,0,0],["Copper",250,0,34],["Iron",380,120,42],["Classical",520,200,48],
+ ["Dark",680,280,52],["Feudal",850,380,58],["Castle",1050,520,64],["Imperial",1300,700,70]
+];
+const UNITS={
+ vill:{hp:45,atk:4,spd:3.5,range:.9,cd:1.5,cost:{food:50},pop:1,train:14},
+ inf:{hp:75,atk:9,spd:3.3,range:1,cd:1.5,cost:{food:60,gold:20},pop:1,train:15},
+ rng:{hp:48,atk:8,spd:3.2,range:8.5,cd:1.9,cost:{wood:40,gold:25},pop:1,train:16},
+ cav:{hp:115,atk:12,spd:5.4,range:1.1,cd:1.6,cost:{food:80,gold:25},pop:2,train:20},
+ sie:{hp:200,atk:44,spd:2.1,range:9,cd:6,cost:{wood:160,gold:75},pop:3,train:34}
+};
+const BUILD={
+ tc:{hp:1400,r:2.4,cost:{wood:300},pop:10,age:0,train:"vill",time:60},
+ house:{hp:340,r:1.2,cost:{wood:30},pop:5,age:0,time:12},
+ farm:{hp:220,r:1.6,cost:{wood:60},age:0,time:14,walk:1,food:420},
+ store:{hp:420,r:1.4,cost:{wood:60},age:0,time:14},
+ barracks:{hp:760,r:1.9,cost:{wood:120},age:0,train:"inf",time:24},
+ range:{hp:740,r:1.9,cost:{wood:150},age:1,train:"rng",time:26},
+ stable:{hp:760,r:1.9,cost:{wood:150},age:2,train:"cav",time:26},
+ wall:{hp:1200,r:.9,cost:{stone:14},age:2,time:5,thin:1},
+ gate:{hp:1000,r:.9,cost:{stone:30,wood:20},age:2,time:9,thin:1},
+ siegew:{hp:800,r:2.1,cost:{wood:200,gold:50},age:3,train:"sie",time:32},
+ tower:{hp:950,r:1.1,cost:{wood:50,stone:100},age:3,atk:14,range:11,cd:1.6,time:30},
+ fort:{hp:2600,r:2.2,cost:{stone:300,gold:150},age:6,pop:5,train:"inf",time:60},
+ wonder:{hp:3200,r:3,cost:{wood:600,stone:600,gold:600},age:7,time:180}
+};
+const RES={tree:["wood",120,.55],bush:["food",270,.55],gold:["gold",620,.7],rock:["stone",560,.7]};
+let renderer,scene,camera,clock,acc=0,last=performance.now(),running=false,seed=0;
+let terrain=[],walk=[],entities=[],nextId=1,selected=new Set(),drag=null,keys={},aiTimer=0;
+let S={tick:0,players:[],resMax:0,fieldStamp:0,fields:new Map(),fieldBudget:2};
+
+function rng(){seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}
+function noise(x,z){let n=Math.sin(x*12.9898+z*78.233+seed*.0001)*43758.5453;return n-Math.floor(n)}
+function idx(x,z){return z*NT+x}
+function pass(x,z){return x>=0&&z>=0&&x<NT&&z<NT&&walk[idx(x,z)]}
+function tile(v){return Math.max(0,Math.min(NT-1,Math.floor(v/TS+NT/2)))}
+function worldTile(t){return (t+0.5)*TS-WORLD/2}
+function terrainHeight(x,z){
+ let v=0,a=1,s=0;
+ for(let i=0;i<5;i++){v+=noise(x*Math.pow(2,i)*.08,z*Math.pow(2,i)*.08)*a;s+=a;a*=.5}
+ return (v/s)*2.7-.7;
+}
+function setupMap(){
+ terrain=[];walk=new Uint8Array(NT*NT);
+ for(let z=0;z<NT;z++)for(let x=0;x<NT;x++){
+   let h=terrainHeight(x,z), edge=Math.min(x,z,NT-1-x,NT-1-z);
+   if(MAPTYPE===0) h-=Math.max(0,12-edge)*.16;
+   if(MAPTYPE===2) h-=noise(x*.17,z*.17)*.9;
+   walk[idx(x,z)]=(h>.25 && Math.abs(h-(terrainHeight(x+1,z)+terrainHeight(x-1,z))/2)<2.6)?1:0;
+ }
+ keepLargestLand();
+}
+function keepLargestLand(){
+ const seen=new Uint8Array(NT*NT), comps=[];
+ for(let z=0;z<NT;z++)for(let x=0;x<NT;x++)if(walk[idx(x,z)]&&!seen[idx(x,z)]){
+   let q=[[x,z]], c=[];seen[idx(x,z)]=1;
+   for(let i=0;i<q.length;i++){let [a,b]=q[i];c.push([a,b]);
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(d=>{let X=a+d[0],Z=b+d[1];if(pass(X,Z)&&!seen[idx(X,Z)]){seen[idx(X,Z)]=1;q.push([X,Z])}})
+   } comps.push(c);
+ }
+ comps.sort((a,b)=>b.length-a.length);let keep=new Set((comps[0]||[]).map(p=>idx(p[0],p[1])));
+ for(let i=0;i<walk.length;i++)if(!keep.has(i))walk[i]=0;
+}
+function findStart(angle){
+ let cx=NT/2+Math.cos(angle)*NT*.31/2,cz=NT/2+Math.sin(angle)*NT*.31/2,best=null,score=-1e9;
+ for(let k=0;k<500;k++){let x=Math.round(cx+(rng()-.5)*20),z=Math.round(cz+(rng()-.5)*20);if(!pass(x,z))continue;
+  let flat=0;for(let dz=-2;dz<=2;dz++)for(let dx=-2;dx<=2;dx++)if(pass(x+dx,z+dz))flat++;
+  let sep=999;for(const p of S.players)sep=Math.min(sep,Math.hypot(x-p.sx,z-p.sz)*TS);
+  let sc=flat*3+sep;if(sep<55)sc-=10000;if(sc>score){score=sc;best={x,z}}
+ }return best||{x:Math.round(cx),z:Math.round(cz)};
+}
+function addEntity(e){e.id=nextId++;e.px=e.x;e.pz=e.z;e.vx=0;e.vz=0;e.dead=false;e.angle=e.angle||0;entities.push(e);return e}
+function scatter(p){
+ const rings=[["bush",9,7,11],["tree",12,11,16],["gold",6,12,17],["rock",6,13,18],["gold",5,24,30],["rock",5,25,31]];
+ for(const [type,count,a,b] of rings)for(let i=0;i<count;i++){
+  let ang=rng()*Math.PI*2,r=a+rng()*(b-a),x=p.x+Math.cos(ang)*r,z=p.z+Math.sin(ang)*r;
+  if(pass(tile(x+WORLD/2),tile(z+WORLD/2))) addEntity({kind:"res",type,x,z,amount:RES[type][1],radius:RES[type][2]});
+ }
+}
+function createPlayer(team,sx,sz,ai=false){
+ let p={id:team,team,ai,age:0,food:450,wood:300,gold:100,stone:0,pop:0,score:0,builders:[],sx,sz,wonder:0};
+ S.players.push(p);scatter({x:sx,z:sz});
+ addBuilding(p,"tc",sx,sz);
+ for(let i=0;i<7;i++) addUnit(p,"vill",sx+(rng()-.5)*7,sz+(rng()-.5)*7);
+}
+function addUnit(p,type,x,z){
+ let d=UNITS[type];if(p.pop+d.pop>POPMAX)return null;
+ let u=addEntity({kind:"unit",type,owner:p.id,x,z,hp:d.hp,maxhp:d.hp,order:"idle",target:null,cargo:0,resType:null,lastRes:null,cd:0,stuck:0});
+ p.pop+=d.pop;return u;
+}
+function addBuilding(p,type,x,z,complete=true){
+ let d=BUILD[type];if(p.pop+d.pop>POPMAX)return null;
+ let b=addEntity({kind:"building",type,owner:p.id,x,z,hp:d.hp,maxhp:d.hp,progress:complete?1:0,queue:[],rally:{x,z},angle:0});
+ if(complete && type!=="farm" && d.pop)p.pop+=d.pop; blockFootprint(b,true);return b;
+}
+function blockFootprint(b,on){
+ if(BUILD[b.type].walk)return;
+ let r=Math.ceil(BUILD[b.type].r/TS)+1,cx=tile(b.x+WORLD/2),cz=tile(b.z+WORLD/2);
+ for(let z=cz-r;z<=cz+r;z++)for(let x=cx-r;x<=cx+r;x++)if(x>=0&&z>=0&&x<NT&&z<NT){
+   let old=walk[idx(x,z)];walk[idx(x,z)]=on?0:terrain[idx(x,z)]?1:0;if(old!==walk[idx(x,z)])S.fieldStamp++;
+ }
+}
+function contact(b){return (Math.ceil(BUILD[b.type].r/TS)+.5)*TS*1.42+.5}
+function getField(goal){
+ let key=goal;if(S.fields.has(key)&&S.fields.get(key).stamp===S.fieldStamp)return S.fields.get(key);
+ if(S.fieldBudget<=0)return null;S.fieldBudget--;
+ let [gx,gz]=goal.split(",").map(Number),dist=new Int32Array(NT*NT);dist.fill(65535);
+ if(!pass(gx,gz))return null;let q=[idx(gx,gz)];dist[idx(gx,gz)]=0;
+ for(let qi=0;qi<q.length;qi++){let id=q[qi],x=id%NT,z=Math.floor(id/NT);
+  for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dz)continue;let X=x+dx,Z=z+dz;
+   if(!pass(X,Z))continue;if(dx&&dz&&(!pass(x+dx,z)||!pass(x,z+dz)))continue;let ni=idx(X,Z);
+   if(dist[ni]===65535){dist[ni]=dist[id]+1;q.push(ni)}
+  }
+ }
+ S.fields.set(key,{dist,stamp:S.fieldStamp});if(S.fields.size>40)S.fields.delete(S.fields.keys().next().value);return S.fields.get(key);
+}
+function clearLOS(a,b){
+ let n=Math.ceil(Math.hypot(a.x-b.x,a.z-b.z)/1.5);for(let i=1;i<n;i++){let t=i/n,x=a.x+(b.x-a.x)*t,z=a.z+(b.z-a.z)*t;if(!pass(tile(x+WORLD/2),tile(z+WORLD/2)))return false}return true;
+}
+function moveUnit(u,tx,tz,dt){
+ let dx=tx-u.x,dz=tz-u.z,dist=Math.hypot(dx,dz);if(dist<.15)return true;
+ let vx=dx/dist,vz=dz/dist;
+ if(dist>=2.6||!clearLOS(u,{x:tx,z:tz})){
+   let gx=tile(tx+WORLD/2),gz=tile(tz+WORLD/2),f=getField(gx+","+gz);
+   if(f){let ux=tile(u.x+WORLD/2),uz=tile(u.z+WORLD/2),best=f.dist[idx(ux,uz)],bx=ux,bz=uz;
+    for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++){let X=ux+x,Z=uz+y;if(X>=0&&Z>=0&&X<NT&&Z<NT&&f.dist[idx(X,Z)]<best){best=f.dist[idx(X,Z)];bx=X;bz=Z}}
+    if(bx!==ux||bz!==uz){let wx=worldTile(bx),wz=worldTile(bz),dd=Math.hypot(wx-u.x,wz-u.z);if(dd){vx=(wx-u.x)/dd;vz=(wz-u.z)/dd}}
+   }
+ }
+ let sepX=0,sepZ=0;for(const o of entities){if(o===u||o.dead||o.kind!=="unit"||o.owner!==u.owner)continue;let d=Math.hypot(u.x-o.x,u.z-o.z);if(d<1.3&&d>.01){sepX+=(u.x-o.x)/d;sepZ+=(u.z-o.z)/d}}
+ vx+=sepX*.35;vz+=sepZ*.35;let l=Math.hypot(vx,vz)||1;vx/=l;vz/=l;
+ let nx=u.x+vx*UNITS[u.type].spd*dt,nz=u.z+vz*UNITS[u.type].spd*dt;
+ let ti=tile(nx+WORLD/2),tj=tile(nz+WORLD/2);if(pass(ti,tj)||!pass(tile(u.x+WORLD/2),tile(u.z+WORLD/2))){u.x=nx;u.z=nz;u.stuck=0}else u.stuck++;
+ if(u.stuck>=54){u.x=worldTile(tile(u.x+WORLD/2));u.z=worldTile(tile(u.z+WORLD/2));u.stuck=0}
+ return Math.hypot(tx-u.x,tz-u.z)<.65;
+}
+function nearestEnemy(u,range){let best=null,bd=range;for(const e of entities)if(!e.dead&&e.owner!==u.owner&&e.owner!=null){let d=Math.hypot(e.x-u.x,e.z-u.z);if(d<bd){bd=d;best=e}}return best}
+function nearestRes(u,type){let best=null,bd=40;for(const e of entities)if(!e.dead&&e.kind==="res"&&e.type===type&&e.amount>0){let d=Math.hypot(e.x-u.x,e.z-u.z);if(d<bd){bd=d;best=e}}return best}
+function damage(att,tgt){
+ let a=UNITS[att.type]||BUILD[att.type],base=(a.atk||0),cls=att.type==="rng"?"p":att.type==="sie"?"s":"m";
+ if(tgt.kind==="building")base*=cls==="s"?1:cls==="m"?.5:.25;
+ else {if(cls==="s")base*=.55;let bonus=cls==="p"&&tgt.type==="inf"?1.35:cls==="m"&&tgt.type==="cav"?1.55:cls==="m"&&tgt.type==="rng"?1.65:cls==="m"&&tgt.type==="vill"?1.4:1;base=base*bonus-(cls==="p"?2:1)}
+ tgt.hp-=Math.max(1,base);
+ if(tgt.hp<=0)tgt.dead=true;
+}
+function tickUnit(u,dt){
+ const d=UNITS[u.type];u.cd=Math.max(0,u.cd-dt);let p=S.players[u.owner];
+ if(u.order==="move"||u.order==="amove"){if(moveUnit(u,u.tx,u.tz,dt)){u.order="idle";u.tx=u.tz=null}}
+ else if(u.order==="attack"){let t=u.target;if(!t||t.dead){u.target=nearestEnemy(u,13);t=u.target}
+  if(!t){u.order="idle";return}let d0=Math.hypot(t.x-u.x,t.z-u.z);
+  if(d0>d.range*.9)moveUnit(u,t.x,t.z,dt);else if(u.cd<=0){damage(u,t);u.cd=d.cd;heat=1}
+ }else if(u.order==="gather"){
+  let r=u.target;if(!r||r.dead||r.amount<=0){r=nearestRes(u,u.resType||"food");u.target=r}
+  if(!r){u.order="idle";return}let d0=Math.hypot(r.x-u.x,r.z-u.z);
+  if(d0>.9)moveUnit(u,r.x,r.z,dt);else{u.carry=Math.min(18,(u.carry||0)+.62*dt);r.amount=Math.max(0,r.amount-.62*dt);if(u.carry>=18||r.amount<=0){u.order="ret"}}
+ }else if(u.order==="ret"){
+  let b=entities.find(e=>e.kind==="building"&&e.owner===u.owner&&(e.type==="tc"||e.type==="store"));if(!b){u.order="idle";return}
+  if(Math.hypot(b.x-u.x,b.z-u.z)>1.4)moveUnit(u,b.x,b.z,dt);else{p[u.resType||"food"]+=(u.carry||0);u.carry=0;u.order="gather";u.target=null}
+ }else if(u.order==="idle"&&u.type!=="vill"){let e=nearestEnemy(u,11);if(e){u.order="attack";u.target=e}}
+}
+function tickBuildings(dt){
+ for(const b of entities)if(!b.dead&&b.kind==="building"&&b.progress>=1){
+   if(b.queue.length){let q=b.queue[0];q.t-=dt;if(q.t<=0){let p=S.players[b.owner];if(addUnit(p,q.type,b.rally.x,b.rally.z))b.queue.shift()}}
+   if((b.type==="tower"||b.type==="fort")&&b.cd<=0){let e=nearestEnemy(b,b.type==="tower"?11:13);if(e){damage({type:"inf",atk:b.type==="tower"?14:26},e);b.cd=b.type==="tower"?1.6:1.8;heat=1}}
+   b.cd=Math.max(0,(b.cd||0)-dt);
+ }
+}
+function tickAI(p){
+ if(!p.ai)return;
+ let villagers=entities.filter(e=>e.owner===p.id&&e.kind==="unit"&&e.type==="vill"&&!e.dead);
+ for(const u of villagers)if(u.order==="idle"){let need=p.age>=3?"gold":p.food<300?"food":"wood";u.resType=need;u.order="gather"}
+ if(p.pop<12&&p.food>60){let tc=entities.find(e=>e.owner===p.id&&e.type==="tc");if(tc&&tc.queue.length<2){tc.queue.push({type:"vill",t:14}) ;p.food-=50}}
+ if(p.wood<80&&p.food>100){for(const u of villagers)if(u.order==="idle"){u.resType="wood";u.order="gather"}}
+ let houses=entities.filter(e=>e.owner===p.id&&e.type==="house"&&!e.dead).length;
+ if(p.pop>=5+houses*5-2&&p.wood>=30)addBuilding(p,"house",p.sx+(rng()-.5)*20,p.sz+(rng()-.5)*20)&& (p.wood-=30);
+ let barr=entities.find(e=>e.owner===p.id&&e.type==="barracks"&&!e.dead);
+ if(!barr&&p.wood>=120){addBuilding(p,"barracks",p.sx+8,p.sz+6);p.wood-=120}
+ if(barr&&p.food>=60&&p.gold>=20&&barr.queue.length<2){barr.queue.push({type:"inf",t:15});p.food-=60;p.gold-=20}
+ let ageCost=AGES[p.age+1];if(ageCost&&p.food>=ageCost[1]&&p.gold>=ageCost[2]&&villagers.length>=9){p.food-=ageCost[1];p.gold-=ageCost[2];p.age++;flash("Reached "+AGES[p.age][0]+" Age!")}
+ let enemies=entities.filter(e=>e.owner!==p.id&&e.kind==="unit"&&!e.dead);
+ let army=entities.filter(e=>e.owner===p.id&&["inf","rng","cav","sie"].includes(e.type)&&!e.dead);
+ if(army.length>=5&&enemies.length){for(const u of army){if(u.order==="idle"){u.order="attack";u.target=enemies[0]}}}
+}
+function cleanup(){
+ for(let i=entities.length-1;i>=0;i--)if(entities[i].dead){let e=entities[i];if(e.kind==="building")blockFootprint(e,false);entities.splice(i,1)}
+ for(const p of S.players)p.pop=entities.filter(e=>!e.dead&&e.owner===p.id&&e.kind==="unit").reduce((n,e)=>n+UNITS[e.type].pop,0);
+ for(const p of S.players){let enemy=S.players.find(q=>q.team!==p.team&&entities.some(e=>e.owner===q.id&&e.kind==="building"&&["tc","barracks","range","stable","siegew","fort","wonder"].includes(e.type)));if(!enemy){p.won=true}}
+}
+function simTick(){
+ S.tick++;S.fieldBudget=2;
+ for(const u of entities)if(!u.dead&&u.kind==="unit")tickUnit(u,TICK);
+ tickBuildings(TICK);
+ if(S.tick%10===0){aiTimer++;for(const p of S.players)if(p.ai&&p.id%3===S.tick%3)tickAI(p)}
+ if(S.tick%20===0)cleanup();
+}
+function buildButton(type){
+ const d=BUILD[type],p=S.players[0];let can=p.age>=d.age&&Object.entries(d.cost).every(([k,v])=>p[k]>=v)&&p.pop+d.pop<=POPMAX;
+ const b=document.createElement("button");b.textContent=type+(d.age>p.age?" 🔒":"");b.disabled=!can;
+ b.onclick=()=>{let x=cursor.x,z=cursor.z,nb=addBuilding(p,type,x,z,false);if(nb){for(const [k,v] of Object.entries(d.cost))p[k]-=v;selected.clear();nb.progress=0;cursor.mode=null;renderUI()}};return b;
+}
+function trainButton(type,b){
+ const p=S.players[0],d=UNITS[type],can=p.age>=0&&Object.entries(d.cost).every(([k,v])=>p[k]>=v)&&p.pop+d.pop<=POPMAX;
+ const x=document.createElement("button");x.textContent="Train "+type;x.disabled=!can;x.onclick=()=>{for(const[k,v]of Object.entries(d.cost))p[k]-=v;b.queue.push({type,t:d.train});};return x;
+}
+function renderUI(){
+ const p=S.players[0];for(const k of ["food","wood","gold","stone"])document.getElementById(k).textContent=Math.floor(p[k]);
+ document.getElementById("pop").textContent=p.pop+"/"+POPMAX;document.getElementById("age").textContent=AGES[p.age][0];
+ const ab=document.getElementById("actions");ab.innerHTML="";
+ let ss=[...selected].map(id=>entities.find(e=>e.id===id)).filter(Boolean),title="";
+ if(ss.length)title=ss.length+" selected · "+ss.map(e=>e.kind==="unit"?e.type:e.type).join(", ");
+ document.getElementById("selected").textContent=title||"Nothing selected";
+ if(ss.length===1&&ss[0].kind==="building"){let b=ss[0];if(BUILD[b.type].train)ab.appendChild(trainButton(BUILD[b.type].train,b))}
+ if(ss.length&&ss.every(e=>e.kind==="unit")){for(const t of ["inf","rng","cav","sie"])ab.appendChild(document.createTextNode(""))}
+ if(ss.length===1&&ss[0].kind==="unit"&&ss[0].type==="vill"){
+   ["house","farm","store","barracks","range","stable","tower","siegew","fort","wall","gate","wonder"].forEach(t=>ab.appendChild(buildButton(t)));
+ }
+}
+function flash(s){document.getElementById("hint").textContent=s;setTimeout(()=>document.getElementById("hint").textContent="Left-drag select · Right-click move/attack · A attack-move · H town centre · Wheel zoom",1800)}
+function saveGame(){localStorage.setItem("flintfire",JSON.stringify({seed,S,entities:entities.map(e=>({...e}))}));flash("Game saved")}
+function loadGame(){let x=JSON.parse(localStorage.getItem("flintfire")||"null");if(!x)return false;seed=x.seed;S=x.S;entities=x.entities;S.fields=new Map();nextId=Math.max(...entities.map(e=>e.id),0)+1;setupMap();for(const b of entities.filter(e=>e.kind==="building"))blockFootprint(b,true);for(const p of S.players)p.pop=0;for(const p of S.players)p.pop=entities.filter(e=>e.owner===p.id&&e.kind==="unit").reduce((n,e)=>n+UNITS[e.type].pop,0);return true}
+let MAPTYPE=0,heat=0,cursor={x:0,z:0,mode:null};
+function init3D(){
+ renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,1.7));renderer.setSize(innerWidth,innerHeight);document.body.appendChild(renderer.domElement);
+ scene=new THREE.Scene();scene.background=new THREE.Color("#64715e");
+ camera=new THREE.OrthographicCamera(-45,45,30,-30,.1,1000);camera.position.set(0,80,80);camera.lookAt(0,0,0);
+ scene.add(new THREE.HemisphereLight(0xcad8c2,0x303a32,1.5));
+ const dl=new THREE.DirectionalLight(0xffffff,1.2);dl.position.set(-40,80,30);scene.add(dl);
+ buildTerrain();renderer.domElement.addEventListener("contextmenu",e=>e.preventDefault());
+ renderer.domElement.addEventListener("pointerdown",pointerDown);renderer.domElement.addEventListener("pointermove",pointerMove);renderer.domElement.addEventListener("pointerup",pointerUp);
+ addEventListener("wheel",e=>{camera.zoom=Math.max(.25,Math.min(2.3,camera.zoom*(e.deltaY>0?.9:1.1)));camera.updateProjectionMatrix()});
+ addEventListener("keydown",e=>{keys[e.key.toLowerCase()]=1;if(e.key==="a")issue("amove");if(e.key==="h"){let b=entities.find(e=>e.owner===0&&e.type==="tc");if(b)center(b.x,b.z)}if(e.key==="Delete")deleteSelected()});
+ addEventListener("keyup",e=>keys[e.key.toLowerCase()]=0);
+ requestAnimationFrame(loop);
+}
+function buildTerrain(){
+ const g=new THREE.PlaneGeometry(WORLD,WORLD,NT-1,NT-1);g.rotateX(-Math.PI/2);
+ const pos=g.attributes.position;for(let i=0;i<pos.count;i++){let x=Math.round((pos.getX(i)+WORLD/2)/TS),z=Math.round((pos.getZ(i)+WORLD/2)/TS);pos.setY(i,terrainHeight(x,z)*1.4)}
+ const m=new THREE.MeshLambertMaterial({color:0x77816b});scene.add(new THREE.Mesh(g,m));
+}
+const meshes=new Map();
+function drawEntities(){
+ for(const [id,m]of meshes){if(!entities.some(e=>e.id===id)){scene.remove(m);meshes.delete(id)}}
+ for(const e of entities){if(meshes.has(e.id)){let m=meshes.get(e.id);m.position.set(e.x,.7,e.z);if(e.kind==="unit")m.material.color.set(e.owner===0?TEAM[0]:TEAM[e.owner]);continue}
+  let geo,mat;
+  if(e.kind==="res"){geo=new THREE.ConeGeometry(e.radius,.8,6);mat=new THREE.MeshLambertMaterial({color:e.type==="tree"?0x355d37:e.type==="bush"?0x5b8c45:e.type==="gold"?0xc5a43a:0x777777})}
+  else if(e.kind==="unit"){geo=new THREE.CapsuleGeometry(.25,.55,3,6);mat=new THREE.MeshLambertMaterial({color:e.owner===0?TEAM[0]:TEAM[e.owner]})}
+  else {geo=new THREE.BoxGeometry(BUILD[e.type].r*1.4,.9,BUILD[e.type].r*1.4);mat=new THREE.MeshLambertMaterial({color:e.owner===0?0x6687a8:0xa25d56})}
+  let m=new THREE.Mesh(geo,mat);m.position.set(e.x,.7,e.z);scene.add(m);meshes.set(e.id,m)
+ }
+}
+function screenWorld(ev){let r=renderer.domElement.getBoundingClientRect(),x=(ev.clientX-r.left)/r.width*2-1,y=-(ev.clientY-r.top)/r.height*2+1;
+ let ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2(x,y),camera);let p=ray.ray.origin.clone().add(ray.ray.direction.clone().multiplyScalar(-ray.ray.origin.y/ray.ray.direction.y));return{x:p.x,z:p.z}}
+function pointerDown(e){if(e.button===0){drag={start:screenWorld(e),cur:screenWorld(e),moved:false}}}
+function pointerMove(e){if(drag){drag.cur=screenWorld(e);drag.moved=Math.hypot(drag.cur.x-drag.start.x,drag.cur.z-drag.start.z)>1}}
+function pointerUp(e){if(!drag)return;let w=screenWorld(e);if(e.button===0){if(drag.moved){let a=drag.start,b=w;selected.clear();for(const x of entities)if(!x.dead&&x.owner===0&&x.kind==="unit"&&x.x>=Math.min(a.x,b.x)&&x.x<=Math.max(a.x,b.x)&&x.z>=Math.min(a.z,b.z)&&x.z<=Math.max(a.z,b.z))selected.add(x.id)}else{let hit=entities.filter(x=>!x.dead&&x.owner===0&&Math.hypot(x.x-w.x,x.z-w.z)<1.4).sort((a,b)=>Math.hypot(a.x-w.x,a.z-w.z)-Math.hypot(b.x-w.x,b.z-w.z))[0];selected.clear();if(hit)selected.add(hit.id)}}else if(e.button===2)issue("move",w.x,w.z);drag=null;renderUI()}
+function issue(order,x,z){let ss=[...selected].map(id=>entities.find(e=>e.id===id)).filter(e=>e&&e.owner===0&&e.kind==="unit");if(!ss.length)return;for(const u of ss){let enemy=nearestEnemyAt(x,z,2.5);if(enemy){u.order="attack";u.target=enemy}else{u.order=order==="amove"?"amove":"move";u.tx=x+(rng()-.5)*2;u.tz=z+(rng()-.5)*2}}}
+function nearestEnemyAt(x,z,r){return entities.find(e=>!e.dead&&e.owner!=null&&e.owner!==0&&Math.hypot(e.x-x,e.z-z)<r)}
+function deleteSelected(){for(const id of selected){let e=entities.find(x=>x.id===id);if(e&&e.owner===0&&e.kind==="building")e.dead=true}selected.clear()}
+function center(x,z){camera.position.x=x;camera.position.z=z+80;camera.lookAt(x,0,z)}
+function minimap(){
+ let c=document.getElementById("minimap"),ctx=c.getContext("2d"),w=c.width=c.clientWidth*2,h=c.height=c.clientHeight*2;ctx.clearRect(0,0,w,h);
+ ctx.fillStyle="#56634f";ctx.fillRect(0,0,w,h);for(const e of entities)if(e.kind!=="res"){ctx.fillStyle=e.owner!=null?TEAM[e.owner]:"#aaa";let x=(e.x+WORLD/2)/WORLD*w,z=(e.z+WORLD/2)/WORLD*h;ctx.fillRect(x-2,z-2,4,4)}
+}
+function loop(now){let dt=Math.min(.1,(now-last)/1000);last=now;if(running){acc+=dt;while(acc>=TICK){simTick();acc-=TICK}heat=Math.max(0,heat-dt/6);drawEntities();minimap();renderUI()}renderer.render(scene,camera);requestAnimationFrame(loop)}
+function startGame(tutorial=false){
+ MAPTYPE=Math.floor(Math.random()*3);seed=(Math.random()*0xffffffff)>>>0;S={tick:0,players:[],resMax:0,fieldStamp:0,fields:new Map(),fieldBudget:2};entities=[];nextId=1;setupMap();
+ for(let i=0;i<4;i++){let s=findStart(i*Math.PI/2);createPlayer(i,s.x*TS-WORLD/2,s.z*TS-WORLD/2,i!==0)}
+ document.getElementById("menu").style.display="none";running=true;renderUI();flash(tutorial?"Tutorial: select a villager and gather resources.":"Skirmish started");
+}
+document.getElementById("start").onclick=()=>startGame(false);document.getElementById("tutorial").onclick=()=>startGame(true);
+document.getElementById("ageBtn").onclick=()=>{let p=S.players[0],a=AGES[p.age+1];if(!a)return;if(p.food>=a[1]&&p.gold>=a[2]){p.food-=a[1];p.gold-=a[2];p.age++;flash("Reached "+a[0]+" Age!")}else flash("Need "+a[1]+" food and "+a[2]+" gold")};
+init3D();
+</script>
+</body>
+</html>
